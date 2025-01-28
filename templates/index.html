@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proximity to Water</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }
+        form {
+            margin-bottom: 20px;
+        }
+        .result {
+            margin-top: 20px;
+            font-weight: bold;
+        }
+        .error {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Proximity to Nearest Water Body</h1>
+    <form id="locationForm">
+        <label for="latitude">Latitude (ATX 30.2672):</label><br>
+        <input type="number" id="latitude" name="latitude" step="any" required><br><br>
+        
+        <label for="longitude">Longitude (ATX -97.7431):</label><br>
+        <input type="number" id="longitude" name="longitude" step="any" required><br><br>
+        
+        <button type="submit">Submit</button>
+    </form>
+    
+    <div id="result" class="result"></div>
+
+    <script>
+        document.getElementById('locationForm').addEventListener('submit', async function (e) {
+            e.preventDefault();
+
+            const lat = document.getElementById('latitude').value;
+            const lon = document.getElementById('longitude').value;
+
+            const resultDiv = document.getElementById('result');
+            resultDiv.textContent = "Calculating...";
+
+            try {
+                const response = await fetch('/calculate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ latitude: lat, longitude: lon }),
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    resultDiv.textContent = data.result;
+                } else {
+                    resultDiv.innerHTML = `<span class="error">${data.error}</span>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<span class="error">An unexpected error occurred: ${error.message}</span>`;
+            }
+        });
+    </script>
+</body>
+</html>
