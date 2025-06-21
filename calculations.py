@@ -4,6 +4,9 @@ import pandas as pd
 import geopandas as gpd
 from shapely.geometry import Point
 import networkx as nx
+import psycopg2
+import json
+from shapely.geometry import mapping
 
 def epsg_calc(lat, lon):
    
@@ -33,48 +36,7 @@ def bbox_calc(lat, lon, time_budget, travel_speed):
     east, west = lon + delta_lon, lon - delta_lon
     bbox= (west, south, east, north) 
     return bbox   #(left, bottom, right, top). 
-    
-def main_calc(lat, lon, time_budget, mode,features_to_fetch):
-    if mode == 'walk':
-        travel_speed = 80 #m/min (about 3 mph)
-    else: #bike
-        travel_speed = 270 #m/min (about 10 mph)
-    #get network
-    bbox = bbox_calc(lat, lon, time_budget, travel_speed)
-    G = ox.graph_from_bbox(bbox, network_type=mode)
 
-    # Get the isochrone
-    gdf_nodes = ox.graph_to_gdfs(G, edges=False)
-    center_node = ox.distance.nearest_nodes(G,lon,lat, return_dist=False) #center_node is just a node ID not affected by projection
-    #get best epsg
-    epsg=epsg_calc(lat,lon)
-    #G = ox.project_graph(G, to_crs={'init': 'epsg:2277'})
-    G = ox.project_graph(G, to_crs=epsg)
-
-    # add an edge attribute for time in minutes required to traverse each edge
-    meters_per_minute = travel_speed * 1000 / 60 #km per hour to m per minute
-    for u, v, k, data in G.edges(data=True, keys=True):
-            data['time'] = data['length'] / meters_per_minute
-
-    # make the isochrone polygons
-    subgraph = nx.ego_graph(G, center_node, radius=time_budget, distance='time')
-    node_points = [Point((data['x'], data['y'])) for node, data in subgraph.nodes(data=True)]
-    bounding_poly = gpd.GeoSeries(node_points).unary_union.convex_hull
-    main_calc_data=[subgraph,bounding_poly]
-
-    #Calculate feature proximities
-    features_to_fetch=["water","school","park"]
-    proximity_data = features_calc(lat, lon, bbox, epsg, bounding_poly, features_to_fetch)
-
-    #Calculate Job access
-    #Job_access_data= job_calc()
-
-    #Calculate socio demographic data
-
-    #socio_demo_data = sociodemo_calc()
-
-    
-    return "Things are being built"
 
 def features_calc(lat, lon, bbox, epsg, bounding_poly,features_to_fetch):
     # Define OSM tag mappings
@@ -163,4 +125,92 @@ def features_calc(lat, lon, bbox, epsg, bounding_poly,features_to_fetch):
         })
 
     return pd.DataFrame(results)
+
+def sociodemo_calc(bounding_poly):
+    # Convert polygon to GeoJSON string
+    poly_geojson = json.dumps(mapping(bounding_poly))
+
+    # Connect to Supabase (Postgres)
+    conn = psycopg2.connect(
+        dbname="postgres",
+        user="postgres",
+        password="7fxL0xfuw9w6PfPd",
+        host="db.fiuxnvanhbujhwdwygto.supabase.co",
+        port="5432"
+    )
+    cursor = conn.cursor()
+
+    # PostGIS query: intersect and weight ACS data by area
+    query = f"""
+    SELECT
+       geoid,
+       total,
+       total_male,
+       total_female,
+       ST_Area(geometry::geography) AS original_area,
+       ST_Area(ST_Intersection(geometry, iso.geom)::geography) AS intersect_area,
+       (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography)) AS area_fraction,
+       total *
+         (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography)) AS estimated_total,
+       total_male *
+         (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography)) AS estimated_male,
+       total_female *
+         (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography)) AS estimated_female
+   FROM
+       idaho_acs_bg,
+       (SELECT ST_SetSRID(ST_GeomFromGeoJSON('{poly_geojson}'), 4326) AS geom) AS iso
+   WHERE
+       ST_Intersects(geometry, iso.geom);
+    """
+
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    columns = [desc[0] for desc in cursor.description]
+    conn.close()
+
+    # Convert to pandas DataFrame
+    df = pd.DataFrame(rows, columns=columns)
+    return df
+    
+def main_calc(lat, lon, time_budget, mode,features_to_fetch):
+    if mode == 'walk':
+        travel_speed = 80 #m/min (about 3 mph)
+    else: #bike
+        travel_speed = 270 #m/min (about 10 mph)
+    #get network
+    bbox = bbox_calc(lat, lon, time_budget, travel_speed)
+    G = ox.graph_from_bbox(bbox, network_type=mode)
+
+    # Get the isochrone
+    gdf_nodes = ox.graph_to_gdfs(G, edges=False)
+    center_node = ox.distance.nearest_nodes(G,lon,lat, return_dist=False) #center_node is just a node ID not affected by projection
+    #get best epsg
+    epsg=epsg_calc(lat,lon)
+    #G = ox.project_graph(G, to_crs={'init': 'epsg:2277'})
+    G = ox.project_graph(G, to_crs=epsg)
+
+    # add an edge attribute for time in minutes required to traverse each edge
+    meters_per_minute = travel_speed * 1000 / 60 #km per hour to m per minute
+    for u, v, k, data in G.edges(data=True, keys=True):
+            data['time'] = data['length'] / meters_per_minute
+
+    # make the isochrone polygons
+    subgraph = nx.ego_graph(G, center_node, radius=time_budget, distance='time')
+    node_points = [Point((data['x'], data['y'])) for node, data in subgraph.nodes(data=True)]
+    bounding_poly = gpd.GeoSeries(node_points).unary_union.convex_hull
+    #main_calc_data=[subgraph,bounding_poly]
+
+    #Calculate feature proximities
+    features_to_fetch=["water","school","park"]
+    proximity_data = features_calc(lat, lon, bbox, epsg, bounding_poly, features_to_fetch)
+   #Calculate socio demographic data
+
+    socio_demo_data = sociodemo_calc(bounding_poly)
+    #Calculate Job access
+    #Job_access_data= job_calc()
+
+    
+    return proximity_data, socio_demo_data
+
+
 
