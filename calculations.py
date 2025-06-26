@@ -8,6 +8,7 @@ import psycopg2
 import json
 from shapely.geometry import mapping
 
+
 def epsg_calc(lat, lon):
    
     try:
@@ -124,10 +125,21 @@ def features_calc(lat, lon, bbox, epsg, bounding_poly,features_to_fetch):
             "mean_dist_m": dists.mean()
         })
 
-    return pd.DataFrame(results)
+    feature_summary = {
+    item["feature"]: {
+        "count": item["count"],
+        "total_area_m2": item["total_area_m2"],
+        "nearest_dist_m": item["nearest_dist_m"],
+        "mean_dist_m": item["mean_dist_m"]
+    }
+    for item in results
+    }
+
+    return feature_summary
 
 def sociodemo_calc(bounding_poly):
-    # Convert polygon to GeoJSON string
+
+  
     poly_geojson = json.dumps(mapping(bounding_poly))
 
     # Connect to Supabase (Postgres)
@@ -143,34 +155,29 @@ def sociodemo_calc(bounding_poly):
     # PostGIS query: intersect and weight ACS data by area
     query = f"""
     SELECT
-       geoid,
-       total,
-       total_male,
-       total_female,
-       ST_Area(geometry::geography) AS original_area,
-       ST_Area(ST_Intersection(geometry, iso.geom)::geography) AS intersect_area,
-       (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography)) AS area_fraction,
-       total *
-         (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography)) AS estimated_total,
-       total_male *
-         (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography)) AS estimated_male,
-       total_female *
-         (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography)) AS estimated_female
-   FROM
-       idaho_acs_bg,
-       (SELECT ST_SetSRID(ST_GeomFromGeoJSON('{poly_geojson}'), 4326) AS geom) AS iso
-   WHERE
-       ST_Intersects(geometry, iso.geom);
+    SUM(total *
+      (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography))) AS estimated_total,
+    SUM(total_male *
+      (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography))) AS estimated_male,
+    SUM(total_female *
+      (ST_Area(ST_Intersection(geometry, iso.geom)::geography) / ST_Area(geometry::geography))) AS estimated_female
+FROM
+    idaho_acs_bg,
+    (SELECT ST_SetSRID(ST_GeomFromGeoJSON('{poly_geojson}'), 4326) AS geom) AS iso
+WHERE
+    ST_Intersects(geometry, iso.geom);
     """
 
     cursor.execute(query)
-    rows = cursor.fetchall()
-    columns = [desc[0] for desc in cursor.description]
+    row = cursor.fetchone()
     conn.close()
 
-    # Convert to pandas DataFrame
-    df = pd.DataFrame(rows, columns=columns)
-    return df
+    return {
+        "total_popl": row[0],
+        "total_male": row[1],
+        "total_female": row[2]
+    }
+
     
 def main_calc(lat, lon, time_budget, mode,features_to_fetch):
     if mode == 'walk':
@@ -197,20 +204,22 @@ def main_calc(lat, lon, time_budget, mode,features_to_fetch):
     # make the isochrone polygons
     subgraph = nx.ego_graph(G, center_node, radius=time_budget, distance='time')
     node_points = [Point((data['x'], data['y'])) for node, data in subgraph.nodes(data=True)]
-    bounding_poly = gpd.GeoSeries(node_points).unary_union.convex_hull
-    #main_calc_data=[subgraph,bounding_poly]
+    poly = gpd.GeoSeries(node_points).unary_union.convex_hull
+    poly_proj = gpd.GeoSeries([poly], crs=epsg)
+    bounding_poly_proj = poly_proj.iloc[0]
+    bounding_poly_4326 = poly_proj.to_crs(epsg=4326).iloc[0]
+    bounding_poly_geojson = json.loads(bounding_poly_4326.to_json())["features"][0]["geometry"]
+
 
     #Calculate feature proximities
     features_to_fetch=["water","school","park"]
-    proximity_data = features_calc(lat, lon, bbox, epsg, bounding_poly, features_to_fetch)
+    proximity_data = features_calc(lat, lon, bbox, epsg, bounding_poly_proj, features_to_fetch)
    #Calculate socio demographic data
 
-    socio_demo_data = sociodemo_calc(bounding_poly)
-    #Calculate Job access
-    #Job_access_data= job_calc()
-
-    
-    return proximity_data, socio_demo_data
-
-
-
+    socio_demo_data = sociodemo_calc(bounding_poly_4326)
+    # Final result dictionary
+    return {
+    **proximity_data,     # unpack all feature keys & values here
+    **socio_demo_data,    # unpack all sociodemo keys & values here
+    "bounding_poly_geojson": bounding_poly_geojson
+}
